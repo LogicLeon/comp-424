@@ -153,18 +153,217 @@ class StudentAgent(Agent):
         # diagonals and horizontals and verticals to check how much away we are from winning
         
             
-        
-    def step(self, board, reserves, player, opponent):
-        """Return the Move you want to play.
+    def search_evaluate(self, board, reserves, player):
+        """Temporary lightweight evaluation for testing the search."""
+        owners, sizes = top_view(board)
+        opponent = 3 - player
+        score = 0
 
-        Takes: board, reserves - your own copies of the current position.
-               player, opponent - your player number (1 or 2) and the other one.
-        Agent.step in agents/agent.py explains each argument and the time limit.
-        """
+        weights = [0, 1, 10, 100, 10000]
+
+        # Evaluate all possible winning lines
+        lines = []
+
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+                    cells = [
+                        (r + i * dr, c + i * dc)
+                        for i in range(WIN_LENGTH)
+                    ]
+
+                    if all(0 <= rr < BOARD_SIZE and
+                           0 <= cc < BOARD_SIZE
+                           for rr, cc in cells):
+                        lines.append(cells)
+
+        for line in lines:
+            values = [owners[r, c] for r, c in line]
+
+            if OBSTACLE in values:
+                continue
+
+            ours = values.count(player)
+            theirs = values.count(opponent)
+
+            if theirs == 0:
+                score += weights[ours]
+
+            if ours == 0:
+                score -= weights[theirs]
+
+        return score
+
+    def alpha_beta(self, board, reserves, depth,
+                   alpha, beta, current_player,
+                   root_player, deadline, distance):
+
+        if time.perf_counter() >= deadline:
+            raise TimeoutError
+
+        # Check terminal positions using the previous mover
+        winner = check_winner(board, 3 - current_player)
+
+        if winner == root_player:
+            return 1000000 - distance
+
+        if winner == 3 - root_player:
+            return -1000000 + distance
+
+        moves = get_valid_moves(
+            board, reserves, current_player
+        )
+
+        # Handle positions with no legal moves
+        if not moves:
+            if ALLOW_MOVES:
+                if current_player == root_player:
+                    return -1000000 + distance
+                return 1000000 - distance
+
+            # Placement-only variant: draw or forced pass
+            if not get_valid_moves(
+                board, reserves, 3 - current_player
+            ):
+                return 0
+
+            if depth == 0:
+                return self.search_evaluate(
+                    board, reserves, root_player
+                )
+
+            return self.alpha_beta(
+                board, reserves, depth - 1,
+                alpha, beta, 3 - current_player,
+                root_player, deadline, distance + 1
+            )
+
+        # Evaluate nonterminal positions at the depth limit
+        if depth == 0:
+            return self.search_evaluate(
+                board, reserves, root_player
+            )
+
+        # MAX node: our turn
+        if current_player == root_player:
+            best = float("-inf")
+
+            for move in moves:
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError
+
+                b, r = copy_state(board, reserves)
+                execute_move(b, r, current_player, move)
+
+                value = self.alpha_beta(
+                    b, r, depth - 1,
+                    alpha, beta, 3 - current_player,
+                    root_player, deadline, distance + 1
+                )
+
+                best = max(best, value)
+                alpha = max(alpha, best)
+
+                if alpha >= beta:
+                    break
+
+            return best
+
+        # MIN node: opponent's turn
+        else:
+            best = float("inf")
+
+            for move in moves:
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError
+
+                b, r = copy_state(board, reserves)
+                execute_move(b, r, current_player, move)
+
+                value = self.alpha_beta(
+                    b, r, depth - 1,
+                    alpha, beta, 3 - current_player,
+                    root_player, deadline, distance + 1
+                )
+
+                best = min(best, value)
+                beta = min(beta, best)
+
+                if alpha >= beta:
+                    break
+
+            return best
+
+
+    def search_root(self, board, reserves, player,
+                    depth, deadline, preferred_move):
+
+        moves = get_valid_moves(board, reserves, player)
+
+        # Search the previous iteration's best move first
+        if preferred_move in moves:
+            moves.remove(preferred_move)
+            moves.insert(0, preferred_move)
+
+        best_move = moves[0]
+        best_score = float("-inf")
+
+        alpha = float("-inf")
+        beta = float("inf")
+
+        for move in moves:
+            if time.perf_counter() >= deadline:
+                raise TimeoutError
+
+            b, r = copy_state(board, reserves)
+            execute_move(b, r, player, move)
+
+            score = self.alpha_beta(
+                b, r, depth - 1,
+                alpha, beta, 3 - player,
+                player, deadline, 1
+            )
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+
+            alpha = max(alpha, best_score)
+
+        return best_move, best_score
+
+    def step(self, board, reserves, player, opponent):
+        """Choose a move using iterative deepening alpha-beta."""
+
         start = time.perf_counter()
-        # ALLOW_MOVES and WIN_LENGTH (from constants) are the rule flags of this game.
-        # helpers.get_valid_moves / check_winner already respect them; your own
-        # move generator and evaluation function must too.
-        # TODO: replace with your search. Keep (time.perf_counter() - start) < STEP_TIME_LIMIT - margin.\
-        
-        return random_move(board, reserves, player)
+        deadline = start + STEP_TIME_LIMIT - 0.25
+
+        moves = get_valid_moves(board, reserves, player)
+
+        if not moves:
+            return None
+
+        # Always keep a legal fallback move
+        best_move = moves[0]
+        depth = 1
+
+        while time.perf_counter() < deadline:
+            try:
+                candidate, score = self.search_root(
+                    board, reserves, player,
+                    depth, deadline, best_move
+                )
+
+                # Update only after a completed search
+                best_move = candidate
+
+                # Stop early if a forced win was found
+                if score >= 900000:
+                    break
+
+                depth += 1
+
+            except TimeoutError:
+                break
+
+        return best_move
